@@ -1,0 +1,30 @@
+# Downloaded datasets, generated results and reference papers
+/datasets/
+/outputs/
+/references/
+
+# Data arrays and PDF files saved outside the standard directories
+*.mat
+*.npz
+*.npy
+*.h5
+*.hdf5
+*.pdf
+
+# Python bytecode, caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+
+# Temporary work and operating-system files
+/tmp/
+/.migration_work/
+*.log
+.DS_Store
+Thumbs.db

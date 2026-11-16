@@ -1,0 +1,577 @@
+# TUM 运动数据恢复上肢 12 关节坐标：实施指南
+
+## 1. 目标、输入与输出
+
+本指南记录仓库中实际执行的 TUM/Vicon 三维标记点到 `q1…q12` 的恢复流程，涵盖数据读取、点组筛选、G99 几何转换、未知角度下的个体化标定、逐帧 IK、运动学滤波、质量控制及 sEMG 对齐。当前推荐入口为 `reconstruct_angles.py`，其调用链为 `runner.py → calibration.py → pipeline.py → filtering.py / kinematics.py / quality.py → emg_sync.py`。正文中的参数对应这条执行路径。
+
+**相关数据集已下载完成**，位于 [`datasets/TUM/TUM`](../datasets/TUM/TUM/)。已检查 6 名受试者全部 601 个 MoCap 文件，均含 38 个标记点，名称和顺序一致。数据接口、名称映射和质量统计见 [TUM 标记点核查](TUM_marker_analysis.md)。
+
+### 1.1 输入资料
+
+| 资料 | 状态与用途 |
+|---|---|
+| TUM 原始 `.mat`、配套 `Readme.txt`、`plot_KIN.m`、`getMarkerNames.m` | 数据集已下载；检查实际文件结构，读取轨迹并核对标签 |
+| Hu、Kuehn、Haddadin（2018）全文 `[H18]` | 已获得；确定 12 坐标框架与原方法的已知要求 |
+| Garner、Pandy（1999）全文 `[G99]` | 已获得；Tables I–III 已录入并交叉核对，见 [G99参考参数](../configs/motion_reconstruction/garner1999_tables.json) |
+| Hu 的原始模型代码、个体标定参数、EKF 配置及角度结果 | 尚未获得；用于进一步核对原作者实现，不作为启动自建 FK/IK 的前提 |
+
+采用 Python NumPy/SciPy 实现重建，程序入口和操作说明见 [Python 重建程序](../reconstruct_angles.py)。原始TUM `timeseries` 通过内部受检查的Python解码器读取，MATLAB配套脚本用于解释原始数据定义。OpenSim 可用于独立对照，其模型和角度定义需要另行核对。
+
+### 1.2 输出与方法边界
+
+每次试验应输出时间戳、`q1…q12`、角度定义、质量标记及验证指标；用于 sEMG 监督的主要标签为 `q9…q12`。
+
+Hu 等使用 EKF 重建关节坐标，但论文未公开完整的标记点绑定、个体化参数、状态方程、协方差和约束实现。本指南采用其模型框架，并对未公开环节给出工程方案。结果应表述为**模型约束下的关节角估计**；与原作者输出的一致性需要原始实现或独立角度测量验证。
+
+文中 `[H18]`、`[G99]`、`[U21]` 对应附录文献。模型来源、代码中的工程参数及尚待独立验证的假设分别注明。第 9 节汇总早期建议与当前端到端实现的差异，当前两个终端入口共用 `src/motion_reconstruction` 内部包。
+
+## 2. 关节模型与坐标约定
+
+### 2.1 骨段链与 12 个角坐标
+
+模型的计算链为：
+
+```text
+Thorax → Clavicle → Scapula → Humerus → Ulna → Radius → Carpal → Hand
+```
+
+`Rib Cage` 相对于 `Thorax` 固定，用于定义肩胛接触的胸廓椭球。该链表示关节变换的依赖关系；各骨段的姿态是否可由标记点充分确定，需要通过可观测性检查判断。
+
+G99 包含 13 个角坐标，H18 固定锁骨轴向旋转后使用 12 个坐标 `[H18, p.1013, §III-A; G99, Table III]`。
+
+| 关节 | 运动坐标（按 G99 次序） | 本指南工作映射 |
+|---|---|---|
+| 胸锁 SC | 抬高/下降；前伸/后缩；前/后轴向旋转 | `q1,q2`；第三轴固定 |
+| 肩锁 AC | 外侧外展/内收；内/外旋；后侧外展/内收 | `q3,q4,q5` |
+| 盂肱 GH | 屈伸；外展/内收；外/内旋 | `q6,q7,q8` |
+| 肱尺 HU | 屈伸 | `q9` |
+| 桡尺 RU | 旋前/旋后 | `q10` |
+| 桡骨—腕骨 RC-FE | 腕屈伸 | `q11`（按 G99 次序推定） |
+| 腕骨—手 RC-RD | 桡/尺偏 | `q12`（按 G99 次序推定） |
+
+H18 未逐轴给出腕部两个坐标的顺序和正方向，也未给出锁骨固定角的数值。当前 `compile_reference()` 将 SC 第三轴固定为 **0 rad**，腕部顺序采用 G99 的 FE→RD。该 13→12 坐标适配及腕部符号与 Hu 原始配置的对应关系保留为待确认项。
+
+### 2.2 参考零位、参考系与单位
+
+- G99 的模型零角姿态：站立、上臂沿躯干下垂、肘伸直、前臂充分旋后、手掌朝前 `[G99, p.112]`。
+- TUM task 0：前臂放桌上、肘约 90°、手掌向下 `[H18, p.1013, Table I]`。第一帧应估计非零初值。
+- G99 Table III 的 `VHP` 栏是尸体采集姿态的角度，不能直接用作 TUM 的零位或初值。
+- 模型计算统一使用位置 **m**、角度 **rad**、时间 **s**；原表的 mm 参数在加载时转换，显示角度可转换为度。
+- 明确区分 Vicon 世界系、Thorax 系、Rib Cage 系和各骨段局部系。G99 躯干参考系约定为 `x` 向右、`y` 向前、`z` 向上 `[G99, p.113, Fig.5]`。
+
+### 2.3 腕部结构与模型约束
+
+腕部包含两个串联铰链：`Radius → Carpal → Hand`。第一轴控制屈伸，第二轴控制桡尺偏；两轴垂直但不相交，第二轴中心在 Carpal 系为 `[0,0,-5] mm` `[G99, p.112, Fig.4; p.120, Table III]`。FK 中保留 Carpal 中间段及这一偏移。
+
+G99 还用肩胛骨上的两个固定点接触胸廓椭球，形成两条完整约束。12 个角变量的数量与独立运动维数应分别报告：若两条接触约束在局部独立且被严格施加，切空间维数可为 `12−2=10`；采用软约束时则需结合约束 Jacobian 和权重解释结果。
+
+## 3. 数据检查与标记点映射
+
+### 3.1 读取和检查本地数据
+
+本地文件为 `subj_XXX/MoCap/trial_YYY.mat`，包含 `marker(1:38)`；每项的 `.name` 是名称，`.ts.Data` 是 `N×3` 位置，`.ts.Time` 是时间。任务试验列表由 `subj_XXX/trial_info.mat` 中的 `trial_info(task_id+1).Kinematics` 给出。
+
+全部文件的时间单位为秒，采样间隔中位数均为 0.002 s。位置元数据为空，按配套 `plot_KIN.m` 标注的 mm 转为 m。全部坐标均为有限值，但 733 条“试验×标记点”轨迹包含 `[0,0,0]`，应先标记为可疑无效点。核查结论见[标记点分析](TUM_marker_analysis.md)。继续求解前检查：
+
+1. 确认 `.mat` 字段、轨迹维度、名称与索引的对应关系，检查受试者分支是否改变标签顺序。
+2. 确认坐标单位、世界轴方向、左右侧、时间戳和实际采样间隔。H18 报告 Vicon 采样率为 500 Hz，计算仍以文件时间戳为准。
+3. 统计缺失率、异常跳变及逐帧有效点数，检查静态或任务初始参考记录。
+4. 绘制标记点静态图与轨迹动画，初步核对解剖位置和骨段归属。
+
+当前接口按 38 个标签设计，每帧只使用有效点。H18 Fig.3 绘出 9 个主要解剖标记并提到冗余点，U21 的 H7 段落描述为 9 个被动标记；本地文件有 9 个主标记名称和 29 个带 `_h` 的辅助名称。辅助名称提供区域线索，其精确贴点与刚性附着仍需验证。
+
+### 3.2 标记点清单与附着表
+
+输出 `marker_inventory.csv`：
+
+```text
+subject,trial,marker_index,marker_name,valid_ratio,first_valid_frame,units,notes
+```
+
+9 个主标记按配套解剖名称的顺序对应如下，索引从 1 开始：
+
+| MAT 索引 | 名称 | 解剖含义 / 候选骨段 |
+|---|---|---|
+| 1 | `m_xp` | 剑突 / Thorax |
+| 3 | `m_jn` | 胸骨颈静脉切迹 / Thorax |
+| 4 | `m_c7` | C7 / Thorax |
+| 6 | `m_t8` | T8 / Thorax |
+| 15 | `m_acr` | 肩峰 / Scapula |
+| 21 | `m_elb` | 肱骨外上髁 / Humerus |
+| 27 | `m_rp` | 桡骨相关点，具体贴点待核实 / Radius |
+| 28 | `m_up` | 配套名称为尺骨头 / Ulna |
+| 33 | `m_mf` | 第三掌骨头 / Hand |
+
+`getMarkerNames.m` 仅列出9个解剖名称。`plot_KIN.m` 对受试者1–3选取的部分索引与实际名称不一致，因此按 `.name` 选点。另有 `m_rp` 被配套脚本称为“桡骨头”，但其在 trial 001 样例中距肘约 239–325 mm，提示远端前臂位置；精确含义保留待核实。38个点的候选含义及证据见[标记点分析](TUM_marker_analysis.md)，最终局部偏置保存在受试者模型中。
+
+最终绑定保存在逐受试者 `estimated_model.json` 的 `markers` 字典，每个名称记录 `segment`、`local_m`、`sigma_m`、`source` 和 `reviewed`。以下 CSV 列结构可用于人工整理绑定表，当前端到端入口的实际绑定产物为 JSON。
+
+```text
+subject,marker_name,anatomical_landmark,segment,local_x_m,local_y_m,local_z_m,source_of_binding,calibration_trial,weight,confidence
+```
+
+标记信息区分解剖名称、跟踪用途、皮肤滑移和骨段归属假设。当前参与固定附着预测的点由第4.2节的筛选规则和工程归属确定，未绑定点可用于原始轨迹核验。G99提供部分解剖特征，TUM标记的局部偏置由多姿态标定估计。
+
+逐受试者的[刚性分析报告](TUM_marker_analysis.md)覆盖6人共532条有效运动试验，提供距离稳定性、点簇拟合、留一点误差及运动激励检查。每任务的第一条有效重复用于训练，其余重复用于留出。每试验最多均匀抽取100帧，使用703对标记距离的试验内稳健尺度、跨试验漂移及最大中心90%跨度构造评分，按3/6 mm阈值完全链接聚类。严格候选的留出拟合/最差单点留一点误差阈值为3/6 mm，宽松候选为6/12 mm，同时检查覆盖、点簇空间分布和动态任务数量。
+
+距离评分取 `max(跨试验距离中位数的MAD尺度, 试验内MAD尺度的P90, 最大试验内(P95−P05)/3.29)`。至少80%的训练试验具备20个有效距离样本才形成有效评分。候选还检查至少8种训练动态任务、3个动态留出试验、留出拟合覆盖中位数至少80%、逐点样本覆盖及模板第二空间尺度至少5 mm。留一点检查每试验最多12帧，三点组单独记录拟合能力。这些数值用于候选筛选，解剖归属的证据保留在逐受试者报告中。
+
+不同受试者使用不同点子集，同一名称前缀可能跨越骨段。刚性分析中的 `cluster_templates.json` 使用任意点簇坐标系。第4节自动标定将候选点连接到模型骨段，最终局部偏置写入 `estimated_model.json`，并保留骨段归属假设。筛选细节和逐点证据见上述分析报告。
+
+### 3.3 实际数据接口
+
+```python
+from src.motion_reconstruction.data_io import load_motion, trial_metadata
+
+data = load_motion("datasets/TUM/TUM/subj_001/MoCap/trial_001.mat")
+data.t      # (N,) 时间戳，试验内相对秒
+data.p      # (N, 38, 3)，世界坐标中的 xyz，m
+data.names  # 38 个标签，与 data.p 第二维对应
+data.valid  # (N, 38) bool，初步有效掩码
+info = trial_metadata("datasets/TUM/TUM/subj_001/MoCap/trial_001.mat")
+```
+
+Python 读取器检查对象布局、数组维度和时间一致性，按配套脚本的 mm 标注换算为 m，将全零或非有限坐标设为无效。其时间轴减去首时间戳，处理方式保存在 metadata 中。当前Python接口见[数据读取模块](../src/motion_reconstruction/data_io.py)。跳变及软组织伪影还需后续检查；任务和有效试验列表按 [task_trial_map.csv](TUM_trial_tasks.md) 或原始 `trial_info` 读取。
+
+## 4. 模型参数与个体化标定
+
+### 4.1 从 G99 参数表建立参考模型
+
+| 来源 | 录入内容 |
+|---|---|
+| Table I，pp.114–115 | 各骨固定参考系的原点、方向余弦及父参考系 |
+| Table II，pp.116–117 | 解剖特征、方向和肩胛 SM/IM 接触点 |
+| Table III，p.120 | 关节中心、旋转轴、旋转次序及轴所属参考系 |
+| p.115 正文 | 胸廓椭球半轴 |
+
+原始参数保存在 [garner1999_tables.json](../configs/motion_reconstruction/garner1999_tables.json)，每项记录页码、单位和参考系；位置保留mm，方向余弦保留原表数值。计算用参考模型由[编译代码](../src/motion_reconstruction/reference_geometry.py)从原始表格生成并转换为m。Table I 同时给出的 Thorax 系与最近端骨段系数据，以及 Table II 的43项特征和 Table III 的两侧轴表示，已用于[交叉检查](../src/motion_reconstruction/reference_geometry.py)。
+
+若局部三轴在父系 A 中的方向为列向量，则：
+
+$$
+{}^A R_B=[{}^A\hat x_B\;{}^A\hat y_B\;{}^A\hat z_B],\qquad
+{}^A T_B=\begin{bmatrix}{}^A R_B&{}^A\boldsymbol o_B\\0&1\end{bmatrix}.
+$$
+
+验证 `R'*R≈I`、`det(R)≈1`，并比较同一原点经父子链计算与表中 Thorax 坐标是否一致。球关节按 Table III 定义的轴 1→2→3 有序旋转实现，核对移动轴与主动/被动变换约定。
+
+`g99.compile_reference()` 对印刷方向余弦矩阵做SVD投影，生成SO(3)旋转矩阵，原始表值保存在来源JSON中。各轴统一到相应关节的父侧零位参考系，随后按序累积旋转。参考模型加载与实际受试者模型分别使用 `reference_geometry` 和 `estimated_subject` 状态。
+
+### 4.2 标定记录与点组选择
+
+`calibration.estimate_subject()` 针对每位受试者独立执行。读取 `trial_info.mat` 的 task 0–30，每任务取 `Kinematics` 列表首个试验，按 `linspace(0,N−1,4)` 取整、去重后抽帧，最多124帧。标定使用未知角度的运动数据。胸廓解剖系无效的帧被剔除，至少保留30帧。各帧任务、试验、原始帧号和时间存入 `calibration.training_records`。
+
+从 `candidate_groups.json` 选择至少3点、区域一致的胸廓、肱骨和手部点组。候选排序分数为严格/宽松等级惩罚0/5，加最差单点留出误差P90，再减 `0.05×点数`。仅有三点拟合的组使用 `15+留出拟合RMS P90`，低分优先。其余骨段采用明确记录的工程归属假设。
+
+| 骨段 | 自动标定采用的点组 |
+|---|---|
+| 胸廓 Thorax | 胸廓区域的最优候选组 |
+| 肱骨 Humerus | 肘部区域的最优候选组 |
+| 手 Hand | 手部区域的最优候选组 |
+| 肩胛骨 Scapula | `m_acr, m_acr_h1, m_acr_h2` |
+| 尺骨 Ulna | `m_rp_h2, m_rp_h3, m_rp_h4, m_up` |
+| 桡骨 Radius | `m_rp, m_rp_h1` |
+
+标定时某个标记至少有10帧有限观测才建立绑定。已运行6人的最终点数依次为29、26、26、21、31、25。点组筛选、前臂两组的骨段假设及肩胛皮肤点簇的参考方向均保存在模型中。[自动标定代码](../src/motion_reconstruction/calibration.py)
+
+### 4.3 胸廓坐标与骨段尺寸初值
+
+标定阶段由四个主标记构造胸廓系。令 `z=normalize((JN+C7−XP−T8)/2)`，将 `JN−C7` 对 `z` 正交化后得到 `y`，再令 `x=normalize(y×z)`、`y=z×x`。原点为JN，旋转矩阵列为 `[x,y,z]`，有限且行列式大于0.9的帧有效。这一解剖初始化与第6.1节的全序列胸廓跟踪分别执行。
+
+G99参考模型来自单具VHP尸体，初始尺寸按标定帧中的距离中位数计算。下表距离单位统一为m，`clip` 上下限为0.7与1.4。
+
+| 初始比例 | 代码采用的计算 |
+|---|---|
+| `s_T` | `clip(median(d(JN,XP)/norm([.00216,.05665,−.20524]), d(JN,T8)/norm([.00072,−.16735,−.14986])))` |
+| `s_H` | `clip((d(ACR,ELB)−.04384*s_T)/norm(G99肱骨侧HU中心))` |
+| `s_F` | `clip(d(ELB,UP)/.25711)` |
+| `s_hand` | `sqrt(s_H*s_F)` |
+
+胸廓、锁骨和肩胛骨共享 `s_T`，肱骨使用 `s_H`，尺骨与桡骨共享 `s_F`，腕骨与手共享 `s_hand`。按骨段比例缩放关节中心局部坐标，胸廓椭球的中心平移、半轴及肩胛接触点同步缩放。后续联合优化继续精调这四组比例。
+
+### 4.4 功能性肘标定与角度初始化
+
+1. 对肱骨、尺骨、肩胛和手的点组建立刚体模板，再逐帧拟合点簇位姿。点簇模板至少需要3个有效点，坐标采用任意簇参考系。
+2. 在上臂与前臂两个点簇中寻找同一肘中心，使 `R_A*c_A+t_A≈R_B*c_B+t_B`。拟合残差尺度为5 mm，局部中心参数相对初值的正则尺度为30 mm，使用 `soft_l1`，最多100次函数评价。初值采用外侧肘标记沿胸廓−X方向移动25 mm，这一偏移是工程先验。
+3. 将两簇的相对旋转相对首个有效姿态转成旋转向量，经SVD取主方向作为功能性肘轴，并按胸廓+X定符号。至少需要10个有效配对帧，主旋转奇异值除以帧数平方根须大于0.15。中心一致性RMS超过20 mm或激励不足时，中心初始化回退到上述25 mm偏移先验。此回退保留相对旋转估计轴，后续将q9标记为绝对角先验依赖。
+4. 将首个有效肩胛点簇位姿的原点和方向锚定到当前胸廓系下的G99零位肩胛位姿，再传递整个点簇的相对运动。由肩胛位姿估计GH中心，由GH到肘的方向和功能轴初始化肱骨，由肘到UP方向初始化尺骨。桡骨由估计近端、RP以及RP−UP方向初始化。腕部中心结合缩放后的G99远端偏移计算，手掌法向由手部点组PCA估计，手纵轴由腕中心到MF方向确定。
+5. 用骨段目标姿态反求每个标定帧的12角初值。姿态矩阵元素残差尺度为0.2，平移尺度为25 mm，有限差分步长 `1e−5 rad`，执行35次有界阻尼更新，每步角向量范数最多0.3 rad。
+
+上述几何初始化将皮肤标记与关节中心分别处理。功能轴、PCA掌面和肩胛参考锚定承担坐标基准选择，尚缺少独立解剖测量确认。
+
+### 4.5 多姿态联合优化
+
+先将实测点经初始FK骨段位姿变换到局部系，取多帧中位数作为标记偏置初值 `r_i^0`。联合优化变量为每帧12角、每点3维偏置增量和4个对数尺度精调量，变量总数为 `12N+3M+4`。胸廓初始化位姿在这一步固定。
+
+定义 `rho(u)=2*(sqrt(1+u²)−1)`，对下列归一化残差的每个标量分量应用 `soft_l1` 后求和。
+
+$$
+r_{\rm cal}=\operatorname{stack}\left(
+\frac{\hat p_{i,t}(q_t,r_i^0+\delta r_i,\exp\eta)-p_{i,t}}{\sigma_i},
+\frac{c(q_t)}{0.05},
+\frac{q_t-q_t^0}{0.5},
+\frac{\delta r_i}{\sigma_{r_i}},
+\frac{\eta}{0.05}
+\right).
+$$
+
+| 项目 | 实际数值或处理 |
+|---|---|
+| 标记位置尺度 `sigma_i` | 胸廓、肩胛、手为6 mm，其余绑定骨段为4 mm |
+| 局部偏置先验 `sigma_r` | 胸廓2 mm，其余骨段15 mm |
+| 偏置增量边界 | 每坐标方向±40 mm |
+| 尺寸精调因子 | `exp(eta)`，范围0.85–1.15，作用于4组初始尺寸 |
+| 角度初值先验 | 每角0.5 rad |
+| 接触残差尺度 | 0.05，无量纲椭球残差 |
+| 缺失标记 | 对应位置残差置零 |
+| 求解器 | SciPy `least_squares`，稀疏Jacobian结构，`loss='soft_l1'` |
+| 终止容差 | `ftol=2e−4, xtol=2e−4, gtol=1e−3` |
+| 评价预算 | 默认50，推荐并行入口遇到优化器未成功时重新标定，预算提高至150 |
+
+角度边界采用以下工程范围，按q1至q12排列，单位为度。
+
+```text
+下限 [-60,-60,-90,-90,-90,-150,-120,-180,-15,-30,-100,-60]
+上限 [ 60, 60, 90, 90, 90, 180, 180, 180,165,210, 100, 60]
+```
+
+最终几何主要由四组尺度和标记局部偏置个体化。关节轴方向与零位旋转沿用G99参考结构，关节中心随所属骨段的比例缩放。功能性肘轴用于姿态初始化，联合优化的几何变量为上述4个尺度。标定完成后按task 0标定帧角度中位数保存 `initial_q_rad`，各试验使用同一受试者模型。
+
+表中的位置尺度和先验尺度是当前代码的工程权重，其实际噪声含义及参数敏感性需要独立评估。
+
+模型状态保存为 `estimated_subject`、`geometry_reviewed=false`。模型内记录选点、初始比例、精调比例、标定帧、功能性肘报告、优化器状态和先验依赖。默认q1–q8及q10带先验依赖，功能性肘回退时补充q9，随后由多初值检查扩展标记。[并行入口的重试与回退处理](../src/motion_reconstruction/runner.py)
+
+## 5. 正向运动学与模型约束
+
+### 5.1 标记点预测
+
+根据关节链计算各骨段位姿。标记点 `i` 绑定于骨段 `B_i`，局部坐标为 `r_i`，其世界坐标预测为：
+
+$$
+\hat{\boldsymbol p}_{i,t}=\operatorname{xyz}\left({}^WT_T(t)\,{}^TT_{B_i}(\boldsymbol q_t;\boldsymbol\beta)
+\begin{bmatrix}\boldsymbol r_i\\1\end{bmatrix}\right).
+$$
+
+`xyz` 取齐次点前三维，`beta` 包含缩放后的关节几何与标记附着参数。几何在标定完成后固定。当前批处理调用 `kinematics.forward()`，按每个关节记录的顺序右乘各轴旋转，再乘 `R_parent_child_zero`，骨段平移由父侧与子侧关节中心连接关系得到。该函数同时返回骨段位姿、瞬时旋转轴、关节中心及标记对12角的精确Jacobian。[批量FK与Jacobian](../src/motion_reconstruction/kinematics.py)
+
+### 5.2 肩胛胸廓接触
+
+G99 用胸廓椭球及肩胛固定点 SM、IM 定义接触。设两点在 Scapula 系中的位置为 `s_j`，转换到 Rib Cage 系：
+
+$$
+{}^R\boldsymbol p_j(\boldsymbol q)=\operatorname{xyz}\left[
+({}^TT_R)^{-1}{}^TT_S(\boldsymbol q)
+\begin{bmatrix}\boldsymbol s_j\\1\end{bmatrix}\right],\quad j=1,2.
+$$
+
+对应接触残差为：
+
+$$
+c_j(\boldsymbol q)=\frac{p_{j,x}^2}{R_x^2}+\frac{p_{j,y}^2}{R_y^2}+\frac{p_{j,z}^2}{R_z^2}-1.
+$$
+
+椭球半轴沿Rib Cage局部轴定义，保留该系相对于Thorax的平移和旋转。当前标定、全序列IK及滤波均将两条 `c_j/0.05` 作为软残差或伪观测，实际接触残差随结果导出。H18提到的肩肱节律函数尚未获得，当前端到端目标函数采用标记、接触和各阶段明确给出的先验项。
+
+### 5.3 FK 验证
+
+进入真实数据求解前，应通过以下检查：
+
+- 参考系正交、父子链坐标一致，`q=0` 对应 G99 参考姿态。
+- 单独改变 `q9`、`q10`、`q11`、`q12`，分别产生预期的肘屈伸、前臂旋转、腕屈伸和桡尺偏；近端骨段保持不变，腕部保留 5 mm 偏移。
+- 肩部旋转次序、关节连接及 SM/IM 接触几何正确。
+- 标记点 Jacobian 与中心差分一致，位置对角度的导数单位为 m/rad。
+
+随后生成满足所选约束的已知角度轨迹，经 FK 生成合成标记，再进行 IK 恢复。对不可辨识的角度，应报告多解或误差来源。
+
+## 6. 关节角求解
+
+### 6.1 全序列读取与胸廓位姿
+
+`pipeline.run_trial()` 按 `trial_info.mat` 列出的运动试验调用 `load_motion()`。默认保持500 Hz，读取实际时间戳。指定较低 `--rate-hz` 时使用 `stride=max(1,round(raw_rate/requested_rate))` 等间隔取样，导出实际 `raw_rate/stride`，这里执行直接抽帧。
+
+逐帧从已标定模型中选出属于Thorax的标记，以 `local_m` 与当前实测世界坐标做Kabsch刚体配准，得到 `T_world_thorax`。至少需要3个非共线有效点，旋转用SVD及行列式修正计算，平移由两组质心确定。同步保存胸廓点位RMS。配准失败的帧保留NaN位姿，IK角度置NaN，并由质量位记录。此步骤将稳定胸廓点组的标定坐标用于跟踪。[胸廓跟踪代码](../src/motion_reconstruction/data_io.py)
+
+### 6.2 实际逐帧鲁棒 IK
+
+`trajectory_ik()` 将各帧角度初始化为该受试者模型的 `initial_q_rad`。令 `q_t^start` 为初值，归一化残差为
+
+$$
+r_t(q)=\operatorname{stack}\left(
+\left\{\frac{\hat p_{i,t}(q)-p_{i,t}}{\sigma_i}\right\}_{i\in V_t},
+\frac{c_{SM}(q)}{0.05},\frac{c_{IM}(q)}{0.05},
+\frac{q-q_t^{start}}{2.0}
+\right),\qquad
+\min_{q_{min}\le q\le q_{max}}\sum_k2\left(\sqrt{1+r_{t,k}(q)^2}-1\right).
+$$
+
+位置尺度继承模型中的4/6 mm绑定参数，角度初值先验尺度为2 rad。缺失标记对应的残差及Jacobian行置零。各帧独立求解，时间上的连续性由第6.3节的滤波状态模型处理。
+
+求解使用向量化有界阻尼Gauss–Newton，默认35次迭代，精确标记与接触Jacobian由 `kinematics.py` 提供。
+
+1. 对当前归一化残差计算 `w=1/sqrt(1+r²)`，构造 `A=JᵀWJ` 和 `g=JᵀWr`。
+2. 初始阻尼为0.01，对角缩放 `D=max(diag(A),1)`，解 `(A+lambda*diag(D))*step=−g`。
+3. 将步长向量范数限制在0.35 rad，并将候选角度裁剪到模型边界。
+4. 稳健目标严格下降时接受候选，阻尼乘0.4，最低 `1e−7`。其余情况阻尼乘5，最高 `1e8`。
+5. 已接受步长范数小于 `1e−5 rad`，或梯度最大绝对分量小于 `1e−4` 时记录该帧收敛。收敛标志在后续迭代中保留，所有帧均标记收敛时提前退出。
+
+输出IK角度、收敛标志、最终步长及稳健代价。推荐入口以 `--iterations` 控制完整试验的迭代预算。验证阶段的45/50次迭代和标记留出检查的30次迭代在第7.1节说明。[逐帧IK实现](../src/motion_reconstruction/kinematics.py)
+
+### 6.3 实际运动学滤波
+
+`trajectory_ekf()` 使用24维匀速状态 `x=[q;qdot]`。每帧将原始标记与软接触残差在独立IK解 `q_t^IK` 处线性化一次。观测仍由原始标记和接触几何构成，线性化位置采用上述IK解。该固定线性化近似记录在实现与结果说明中。
+
+状态转移与过程噪声为
+
+$$
+F_t=\begin{bmatrix}I&\Delta t I\\0&I\end{bmatrix},\qquad
+Q_t=2\begin{bmatrix}\Delta t^3/3&\Delta t^2/2\\\Delta t^2/2&\Delta t\end{bmatrix}\otimes I_{12}.
+$$
+
+`Delta t` 使用相邻原始或抽帧后时间戳之差。首个胸廓位姿有限、至少4个绑定标记有效且IK解有限的帧初始化 `x=[q^IK;0]`，`P0=diag([0.1²×12,1×12])`，该首帧直接输出初始化状态。初始化前输出NaN，后续每帧先按 `F,Q` 预测。
+
+令 `r_IK,J` 为在 `q^IK` 处计算的位置及接触归一化残差与Jacobian，残差包含4/6 mm的位置尺度及0.05的接触尺度。滤波观测更新使用
+
+$$
+e=-r_{IK}-J(q^- -q^{IK}),\quad w_k=(1+e_k^2)^{-1/2},\quad
+H=[J\;0],\quad \Lambda=(P^-)^{-1}+H^TWH,
+$$
+$$
+\delta x=\Lambda^{-1}H^TWe,\qquad
+x^+=x^-+\delta x,\qquad P^+=\Lambda^{-1}.
+$$
+
+代码通过Cholesky分解求解信息矩阵，随后对称化协方差。归一化观测尺度和稳健权重共同决定等效测量权重。无合格观测时保留预测状态，若当帧胸廓缺失或标记不足，质量位仍记录缺失。角度在每帧输出前裁剪到关节边界，并记录裁剪状态。边界裁剪的影响尚未传播到速度状态和协方差。
+
+滤波输出包含角度和 `sqrt(diag(P)[:12])`。该标准差条件于固定的标定模型与胸廓位姿，标定误差、皮肤伪影和胸廓位姿不确定度尚未被完整传播。[轨迹滤波实现](../src/motion_reconstruction/filtering.py)
+
+## 7. 验证、质量控制与导出
+
+### 7.1 几何留出、多初值和标记留出
+
+`pipeline.validate_subject()` 在task `[0,2,3,4,5,7,8,12,20,28]` 的其他重复试验中抽帧，每试验4帧，排除每任务用于几何标定的首个试验。先估计胸廓位姿，再以45次迭代求解IK，计算位置及接触残差。
+
+从这些帧中均匀选最多6帧，执行3次多初值求解。随机数种子81，每次在已有解上添加标准差0.25 rad的高斯扰动，并裁剪到边界，求解50次迭代。对于每个姿态，保留位置RMS距离最佳结果不超过2 mm的解。至少有2个合格解时计算逐角极差，最后取各姿态极差的中位数。中位极差大于5°或无法计算的角度补充先验依赖标记。
+
+同一小样本中，按绑定顺序每隔4个标记抽一个作为留出点，遮蔽该点后运行30次迭代，再计算其预测误差。`geometry_failed` 在位置RMS P90非有限、超过20 mm或标定优化器未成功时置真。其结果记录在模型 `calibration_validation` 和 `validation_report.json`。
+
+这些重复试验参与过前置刚性筛选，当前留出范围针对几何拟合步骤。尺寸、权重等完整敏感性分析尚需另行运行扩展验证。[实际验证流程](../src/motion_reconstruction/pipeline.py)
+
+几何验证失败时，当前入口仍可为可加载的模型计算试验角度，并通过位128记录整组结果的模型质量。查看输出时应同时读取受试者验证状态及逐角标记。
+
+### 7.2 可观测性与逐角质量
+
+38 个标记最多提供每帧 114 个位置标量，但角度能否恢复取决于标记布局、骨段归属和误差。计算标记观测 Jacobian：
+
+$$
+J_m=\frac{\partial h}{\partial q}\in\mathbb R^{3M_{\rm valid}\times12}.
+$$
+
+严格施加接触约束时，令 `C=∂c/∂q`，取零空间基 `N`，检查约束切空间上的敏感度：
+
+$$
+CN=0,\qquad J_{\rm reduced}=J_mN.
+$$
+
+当前 `diagnostics()` 对按标记噪声归一化的 `J_m` 做SVD。数值秩使用阈值 `max(s_max*1e−5,1e−8)`，通过奇异值和右奇异向量构造测量条件标准差，超过0.35 rad的角度标记为弱观测。对极小奇异值采用有限的大逆方差近似，因此该量用于条件诊断。严格接触切空间 `J_reduced` 属于独立的扩展检查，当前批处理报告使用软约束模型的标记Jacobian。
+
+结合多初值、留出标记及独立参数扰动测试解释观测支持与先验影响，重点检查以下运动。
+
+- `q9`：肱骨—尺骨相对运动是否稳定。
+- `q10`：桡骨是否具有足以识别轴向旋转的标记布局。
+- `q11/q12`：手部和腕部有效点的方位与绑定是否支持两个腕角。
+- 肩带：接触和节律约束对角度输出的影响程度。
+
+低重投影误差、曲线平滑度和标记数量均需结合这些检查解释。若有独立 IMU、角度计或已标定动作，可进一步检验角度准确性。
+
+每帧保存 `angle_quality_flag[N,12]`，各位可叠加，`quality_flag[N]` 为12角质量位的按位OR。
+
+| 位值 | 实际触发规则 |
+|---|---|
+| 1 | 有效绑定点少于4个，或角度/胸廓位姿非有限 |
+| 2 | 独立IK求解器未标记收敛，当前在IK结果中设置 |
+| 4 | 有效绑定标记的三维距离RMS超过20 mm，整帧12角标记 |
+| 8 | 该角的测量条件标准差超过0.35 rad |
+| 16 | 任一肩胛椭球接触残差绝对值超过0.05，整帧标记 |
+| 32 | 任一角距上下界小于 `1e−4 rad`，或滤波发生角度裁剪，整帧标记 |
+| 64 | 标定基准或多初值检查判定该角绝对值依赖先验 |
+| 128 | 受试者模型 `geometry_failed=true`，全部角度标记 |
+
+q1–q8、q10默认带位64，功能性肘回退时q9也带位64，多初值检查可能继续扩展角度集合。滤波质量在滤波角度上重新计算，IK未收敛位2的传递以当前各阶段调用为准，`ekf_angles.npz` 当前通过缺失、残差、观测、边界和模型标记反映其质量。所有位均为0表示通过当前条件数值检查，绝对角准确性仍需外部测量验证。[逐角质量代码](../src/motion_reconstruction/filtering.py)
+
+### 7.3 EMG 时间对齐与重采样
+
+1. 仅对 `trial_info.mat` 中同一试验编号同时具有EMG记录的运动试验尝试同步。读取器核对特定MCOS布局、`N×74`原始数组、秒单位、2000 Hz时间步长以及第74列连续递增计数。
+2. 第73列必须只含254和255。枚举被两侧跳变包围的254低电平区间，排除文件起止边界上的区间，计算其持续时间。
+3. MoCap名义时长采用 `t_last−t_first+median(diff(t))`。只接受与该时长相差不超过6 ms且唯一匹配的低电平窗口。
+4. 保存 `offset_s=EMG窗口起点时间−MoCap首时间`，时间尺度固定为1。将EMG时间映射成 `mapped_t=emg_t−offset_s`。该实现估计起始偏移，时钟漂移及硬件延迟保留待确认。
+5. 将滤波后的q9–q12线性插值到映射时间。精确采样点直接复制角度与逐角质量，插值点采用两端质量位的按位OR。只处理有限端点及间隔不超过 `max(0.01,2.1*stride/raw_rate)` 的区间，区间外保留NaN和缺失位。带其他质量位的有限角度仍可插值并携带标记。
+6. 输出 `strict_valid=angle_quality_flag==0`，按角独立生成。由于q10具有绝对相位先验标记，其严格有效掩码为假。窗口不唯一、布局不符或时钟核验失败时，记录 `sync.status='unresolved'` 及原因。
+
+同步状态为 `duration_validated_pulse_candidate`，证据为持续时间匹配和连续计数。脉冲通道语义、硬件延迟及漂移尚缺少独立文档确认。此步骤导出角标签、EMG时间和源文件引用，肌电幅值由原始文件读取；输出中另外记录1基双极通道 `[19,25,26]` 的排除元数据。[EMG同步实现](../src/motion_reconstruction/emg_sync.py)
+
+### 7.4 每次试验的验收与导出
+
+| 层面 | 输出内容 |
+|---|---|
+| 数据 | 标签、有效率、缺失与异常点、单位、时间戳、剔除原因 |
+| 几何 | 整体及各骨段位置残差 RMS/最大值、留出标记预测残差、骨架动画 |
+| 约束 | SM/IM 接触残差、骨段连接检查、节律误差（如启用） |
+| 角度 | `q1…q12`、坐标顺序、参考零位、正方向、单位、范围及速度异常 |
+| 稳定性 | Jacobian 奇异值、初值与参数敏感性、弱可观测角度 |
+| sEMG 标签 | `q9…q12`、时间戳、逐帧或逐角度 `quality_flag`、同步与重采样规则 |
+
+使用报告中的已配置阈值解释质量。骨架动画用于检查关节连接、动作方向和连续性，独立测量用于评估绝对角准确性。
+
+### 7.5 实际产物与模型追溯
+
+```text
+outputs/TUM/reconstruction/
+  manifest.json / summary.json / output_integrity.json / README.md
+  subj_001/                         # 其余受试者使用各自目录
+    estimated_model.json           # 个体化骨架、绑定、标定及验证参数
+    calibration_report.json
+    validation_report.json
+    trial_manifest.json / subject_summary.json / README.md
+    trials/trial_011/
+      ik_angles.npz
+      ekf_angles.npz
+      emg_aligned_distal.npz        # 同步成功时生成
+      report.json
+  migration.json                    # 已有结果迁移及数值一致性记录
+```
+
+| 文件或字段 | 记录内容 |
+|---|---|
+| `estimated_model.json` | 7级关节中心、轴、零位旋转、尺寸缩放后的几何、标记局部偏置及噪声尺度、ST椭球与接触点、边界、初值、标定和验证记录 |
+| `ik_angles.npz / ekf_angles.npz` | `t[N]`、`q[N,12]`、`q_distal[N,4]`、`q_names`、单位rad/s、`T_world_thorax[N,4,4]`、胸廓RMS、逐角/逐帧质量位、标记RMS、接触残差、标记秩/奇异值、测量条件标准差、先验依赖掩码 |
+| `ekf_angles.npz` 附加字段 | `conditional_filter_sd_rad`，固定几何与胸廓条件下的滤波标准差 |
+| `emg_aligned_distal.npz` | EMG时间、重采样q9–q12、逐角质量、严格有效掩码、同步元数据、源EMG路径和通道排除元数据 |
+| `report.json` | 动作编号及原始描述、源MoCap路径、输入/输出帧数与频率、迭代数、IK/滤波指标、同步结果、模型路径和模型/代码SHA256 |
+
+从试验 `report.json` 的 `model_file` 找到对应受试者模型，校验 `model_sha256`，再读取角度文件中的 `q` 和 `T_world_thorax` 即可通过FK恢复逐帧骨架。数值数组主要以float32保存，求解过程中使用浮点双精度。
+
+已保存的全量运行包含6人532条有效运动试验、1,656,023个500 Hz采样点及528条同步导出。subj_002的trial 003、041、042、090缺少有效配对EMG。subj_005的功能性肘中心拟合发生回退，其q9具有先验标记。具体数值与状态以[运行汇总](../outputs/TUM/reconstruction/README.md)和逐试验报告为准。
+
+## 8. 从原始数据运行与视觉核验
+
+### 8.1 环境与前置分析
+
+在项目根目录执行依赖安装。原始数据已经下载，目录为 `datasets/TUM/TUM`。
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+现有逐受试者 `outputs/TUM/marker_analysis/subj_XXX/candidate_groups.json` 可直接供标定读取。候选文件缺失时，重建入口自动在系统临时目录运行刚性分析，只将候选JSON保留到输出目录，其他分析中间文件在完成后清理。
+
+### 8.2 完整批处理与恢复
+
+```powershell
+$env:OPENBLAS_NUM_THREADS="1"
+python reconstruct_angles.py --workers 3
+```
+
+默认处理6人，保持原始500 Hz，全序列IK最多35次迭代。执行顺序为逐人自动标定及必要的预算重试、几何验证、模型保存、逐试验并行IK/滤波/EMG同步、汇总及输出完整性检查。只处理第1人可使用 `--subjects 1`，改变输出目录可使用 `--output outputs/TUM/reconstruction_recomputed`，完整参数见入口 `--help`。
+
+入口会自动复用代码版本匹配的模型。试验复用还核对请求采样率、迭代数、模型哈希以及两种角度文件是否存在。当前代码指纹覆盖数值计算、读取、点组分析、调度、路径定义及G99参考参数。原始数据和候选点组内容当前未全部纳入缓存键。迁移的既有结果保留生成时的 `code_sha256` / `pipeline_code_sha256`，另存 `cache_code_sha256` 用于本次已验证结构的缓存兼容性，迁移依据及数组核验摘要见 `outputs/TUM/reconstruction/migration.json`。改变这些输入后使用新输出目录重新生成，可保持旧结果可追溯。
+
+标定异常记录到 `calibration_failure.json`，试验异常记录到清单中的 `status='failed'`。调度完成后应查看 `manifest.json` 中的预期数、已计算数、失败数和 `output_integrity.json`。输出完整性检查核对文件、数组、时间轴、边界、质量和模型版本，独立角度准确性由外部验证建立。
+
+### 8.3 软件与结果检查
+
+```powershell
+python reconstruct_angles.py --self-check
+python visualize_reconstruction.py
+```
+
+可视化默认加载subj_001的trial_011，其他试验通过“打开结果目录”选择 `subj_XXX/trials/trial_YYY`，或启动时使用 `--results`。程序读取已保存模型与角度，并按报告追溯原始MoCap数据。局部观察可固定肱骨、尺骨、桡骨、腕骨等骨段，按其位姿逆变换显示下游运动。[可视化说明](RECONSTRUCTION_VIEWER.md)
+
+虚拟手掌及五指采用显示程序中的固定示意几何，通过 `frames['hand']` 驱动。该外形在角度结果读取后生成，手部标记贴合情况由标定绑定和IK观测误差解释。虚拟掌面的形状、宽度和偏置尚未以每位受试者的手部标记独立校准。
+
+## 9. 早期建议与实际实现的差异
+
+以下对照用于解释当前计算路径，扩展方案应在独立验证后启用。
+
+| 早期建议或通用接口 | 当前端到端实际实现 | 对结果解释的影响 |
+|---|---|---|
+| IK使用上一帧初值并加入时间平滑惩罚 | 各帧从受试者task 0标定中位角初始化，独立有界稳健求解，初值先验尺度2 rad | 时间相关性由后续24维滤波引入 |
+| SM/IM严格等式约束，可检查 `J_m*N` | 标定、IK及滤波均使用 `c/0.05` 软残差，批处理诊断基于标记Jacobian | 接触可以有残差，保存12坐标并分别报告接触误差 |
+| 可加入肩肱节律项 | 当前端到端路径使用标记、ST和明确先验 | 肩带参考及绝对坐标具有先验依赖 |
+| 常规EKF在预测状态重新计算非线性观测和Jacobian | 每帧在独立IK解处固定线性化一次，使用原始标记及ST残差做稳健信息更新 | 属于已明确记录的线性化近似，参数见第6.3节 |
+| 从随机游走状态开始，可扩展匀速模型 | 当前直接采用 `[q;qdot]` 的24维匀速模型及给定 `Q/P0` | 速度状态与过程噪声参与轨迹平滑 |
+| 由已知角度完成个体标定 | 推荐入口使用未知角度的多姿态受约束联合优化 | 绝对坐标由G99、功能性初始化与先验共同确定 |
+| 广泛优化关节几何和肩带参考 | 当前联合变量为逐帧角、局部标记偏置及4组尺寸比例，关节轴和零位旋转继承G99 | 个体化几何维数受到限制 |
+| 主标记或同一前缀整体归属骨段 | 逐人选择胸廓、肱骨和手的候选子集，肩胛及前臂采用记录的工程归属 | 解剖绑定证据和标记拟合需分别解释 |
+| 统一输出 `marker_binding.csv` | 当前绑定输出为 `estimated_model.json/markers` | CSV列结构保留作人工整理参考 |
+| 完整尺寸/权重扰动、严格约束可观测性验证 | 自动检查几何留出、有限多初值、部分标记留出和标记Jacobian | 扩展敏感性及独立角度验证仍待执行 |
+| 对齐时仅插值质量通过的角度 | 当前EMG路径保留有限估计及两端质量OR，另给逐角 `strict_valid` | 训练时按逐角质量选择标签，q10绝对相位默认有先验标记 |
+| 泛化到任意时间偏移与时钟尺度 | 当前按唯一持续时间匹配的EMG脉冲估计偏移，尺度固定1 | 同步属于经验候选，漂移和延迟需独立依据 |
+
+## 附录 A. 参数与代码组织示例
+
+以下为部分参考参数；完整 Tables I–III 数据和参考FK配置见 [G99参考参数](../configs/motion_reconstruction/garner1999_tables.json)。
+
+| 参数 | 参考值 | 来源 |
+|---|---|---|
+| Rib Cage 原点，Thorax 系 | `[60.66,-58.28,-168.22] mm` | G99 Table I |
+| 椭球半轴，Rib Cage 系 | `[76.85,97.17,217.44] mm` | G99 p.115 |
+| GH 中心，Scapula 系 | `[0,0,-43.84] mm` | G99 Table III |
+| HU 中心，Humerus 系 | `[0.81,25.18,-303.29] mm` | G99 Table III |
+| RU 中心，Ulna 系 | `[23.82,0,0] mm` | G99 Table III |
+| RC-FE 中心，Radius 系 | `[-18.34,-0.34,-278.11] mm` | G99 Table III |
+| RC-RD 中心，Carpal 系 | `[0,0,-5.00] mm` | G99 Table III |
+| SM 接触点，Scapula 系 | `[-117.26,27.07,-9.38] mm` | G99 Table II |
+| IM 接触点，Scapula 系 | `[-143.07,33.75,-115.93] mm` | G99 Table II |
+
+| 铰链轴 | 近端骨段系中的方向 | 远端骨段系中的方向 |
+|---|---|---|
+| HU-FE | Humerus: `(0.999192,0,0.040203)` | Ulna: `(0.976409,0,-0.215927)` |
+| RU-PS | Ulna: `(0.092265,0,0.995734)` | Radius: `(0.135789,0.023796,0.990452)` |
+| RC-FE | Radius: `(0.966275,0,-0.257513)` | Carpal: `(1,0,0)` |
+| RC-RD | Carpal: `(0,1,0)` | Hand: `(0,1,0)` |
+
+方向取自 G99 Table III，各自在表中对应参考姿态与骨段系表示；RU 轴为斜置轴。Python 程序组织如下：
+
+```text
+reconstruct_angles.py                # 终端重建及自检入口
+visualize_reconstruction.py           # 终端可视化及界面自检入口
+configs/motion_reconstruction/
+  garner1999_tables.json              # 原始G99参数与出处
+src/motion_reconstruction/
+  _matlab.py / data_io.py             # TUM对象解码、轨迹和胸廓位姿
+  reference_geometry.py / model.py    # G99编译与关节模型
+  marker_analysis.py / calibration.py # 点组筛选与未知角度个体标定
+  kinematics.py / filtering.py        # FK、Jacobian、逐帧IK与滤波
+  quality.py / emg_sync.py            # 逐角质量与肌电同步
+  pipeline.py / runner.py             # 试验计算及可恢复并行调度
+  reporting.py / integrity.py         # 汇总与全量结果完整性
+  viewer.py / self_check.py / paths.py # 界面、数值自检与项目路径
+outputs/TUM/
+  marker_analysis/                   # 逐人候选点组JSON
+  reconstruction/                    # 最终模型、角度、质量与同步结果
+```
+
+当前重建入口采用第4–8节记录的未知角度自动标定路径。完整运行结果与逐受试者报告见[端到端结果](../outputs/TUM/reconstruction/README.md)。
+
+## 附录 B. 待确认项
+
+| 项目 | 当前依据与处理方式 |
+|---|---|
+| 38 个标签的完整骨段归属和局部偏置 | 名称与索引已核实，候选归属见标记点字典；刚性和局部偏置由多姿态标定确定 |
+| 9 个主标记与 29 个辅助名称的物理含义 | 主标记按名称定位；辅助点精确贴点、`m_rp` 含义及配套绘图索引差异仍需核实 |
+| Hu 固定的 SC 轴及角度值 | 当前实现SC第三轴固定0 rad，Hu实际配置待原代码核对 |
+| Hu 的腕角顺序与正号 | 依据 G99 次序定义工作映射，保存单轴测试结果 |
+| Hu 实际几何、缩放与静态标定 | 使用 G99 参考参数及明确记录的个体化方案 |
+| Hu 的接触、节律和 EKF 配置 | 保存自定义实现及敏感性结果；获得原实现后再比较 |
+
+如需进一步核对，可向作者索取模型代码/参数、标记绑定与标定数据、EKF 配置，以及重建的 `q1…q12` 轨迹。
+
+## 附录 C. 参考文献
+
+**[H18]** Hu, T., Kuehn, J., & Haddadin, S. (2018). *Identification of Human Shoulder-Arm Kinematic and Muscular Synergies During Daily-Life Manipulation Tasks*. IEEE BioRob, 1011–1018. 重点：p.1012 §II-a/Fig.3（标记采集），p.1013 §III-A（模型与 EKF），Fig.4（角坐标），p.1015 §IV-A（PCA 使用 `q1…q10`）。
+
+**[G99]** Garner, B. A., & Pandy, M. G. (1999). *A Kinematic Model of the Upper Limb Based on the Visible Human Project (VHP) Image Dataset*. *Computer Methods in Biomechanics and Biomedical Engineering*, 2(2), 107–124. https://doi.org/10.1080/10255849908907981 。重点：pp.110–113（关节、零位和椭球），pp.114–115 Table I，pp.116–117 Table II，p.120 Table III，p.121（模型局限）。所用 PDF 含出版社封面，印刷 p.120 对应 PDF 第15页。
+
+**[U21]** Averta, G., et al. (2021). *U-Limb: A multi-modal, multi-center database on arm motion control in healthy and post-stroke conditions*. *GigaScience*, 10(6), giab043. https://doi.org/10.1093/gigascience/giab043 。重点：KIN data → H7、Folder TUM。已下载数据集的来源：https://doi.org/10.7910/DVN/FU3QZ9 。
+
+肩部约束和节律的补充参考：Terrier et al. (2010), *A musculoskeletal shoulder model based on pseudo-inverse and null-space optimization*, *Medical Engineering & Physics*, 32, 1050–1056；Lorussi et al. (2016), *A bi-articular model for scapular-humeral rhythm reconstruction through data from wearable sensors*, https://doi.org/10.1186/s12984-016-0149-2 ；van der Helm (1994), *A finite element musculoskeletal model of the shoulder mechanism*, *J. Biomechanics*, 27, 551–569。三者分别对应 H18 参考文献 [28]–[30]，用于理解相关模型，具体实现仍需单独核对。

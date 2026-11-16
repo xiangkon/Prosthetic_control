@@ -1,0 +1,113 @@
+{
+  "source": {
+    "file": "Garner和Pandy - 1999 - A Kinematic Model of the Upper Limb Based on the Visible Human Project (VHP) Image Dataset.pdf",
+    "doi": "10.1080/10255849908907981",
+    "transcription": "Manual visual transcription of scanned Tables I–III; source numbers preserved without normalization",
+    "position_unit": "mm",
+    "direction_unit": "dimensionless",
+    "angle_unit": "degree",
+    "axis_layout": "x_axis,y_axis,z_axis rows each contain coordinates in the indicated parent frame; stack these as columns to build R",
+    "pdf_page_for_printed_page": "printed page minus 105"
+  },
+  "reference_pose": "Standing, humerus alongside thorax, elbow fully extended, forearm fully supinated, palm anterior. Clavicle/scapula reference positions equal their VHP positions (p.115).",
+  "table_I": {
+    "thorax": {
+      "printed_page": 114, "parent": null,
+      "in_thorax": {"origin": [0,0,0], "axes": [[1,0,0],[0,1,0],[0,0,1]]}
+    },
+    "rib_cage": {
+      "printed_page": 114, "parent": "thorax",
+      "in_thorax": {"origin": [60.66,-58.28,-168.22], "axes": [[0.980211,0.191868,0.048710],[-0.196517,0.972773,0.122858],[-0.023812,-0.129999,0.991228]]}
+    },
+    "clavicle": {
+      "printed_page": 114, "parent": "thorax",
+      "in_thorax": {"origin": [32.54,-14.38,-3.71], "axes": [[0.839310,-0.290260,0.459682],[0.426695,0.875777,-0.225902],[-0.337008,0.385700,0.858872]]},
+      "in_parent": {"origin": [32.54,-14.38,-3.71], "axes": [[0.839310,-0.290260,0.459682],[0.426695,0.875777,-0.225902],[-0.337008,0.385700,0.858872]]}
+    },
+    "scapula": {
+      "printed_page": 114, "parent": "clavicle",
+      "in_thorax": {"origin": [161.94,-59.13,67.16], "axes": [[0.672890,0.699955,0.239335],[-0.602196,0.706216,-0.372315],[-0.429626,0.106400,0.896717]]},
+      "in_parent": {"origin": [154.17,0,0], "axes": [[0.471613,0.845990,0.248761],[-0.881562,0.445700,0.155562],[0.020731,-0.292664,0.955991]]}
+    },
+    "humerus": {
+      "printed_page": 114, "parent": "scapula",
+      "in_thorax": {"origin": [180.77,-63.80,27.84], "axes": [[1,0,0],[0,1,0],[0,0,1]]},
+      "in_parent": {"origin": [0,0,-43.84], "axes": [[0.672890,-0.602196,-0.429626],[0.699955,0.706216,0.106400],[0.239335,-0.372315,0.896717]]}
+    },
+    "ulna": {
+      "printed_page": 114, "parent": "humerus",
+      "in_thorax": {"origin": [181.58,-38.61,-275.45], "axes": [[0.966939,0,0.255007],[0,1,0],[-0.255007,0,0.966939]]},
+      "in_parent": {"origin": [0.81,25.18,-303.29], "axes": [[0.966939,0,0.255007],[0,1,0],[-0.255007,0,0.966939]]}
+    },
+    "radius": {
+      "printed_page": 114, "parent": "ulna",
+      "in_thorax": {"origin": [204.62,-38.61,-269.37], "axes": [[0.954823,-0.006175,0.297110],[-0.000990,0.999712,0.023961],[-0.297173,-0.023172,0.954542]]},
+      "in_parent": {"origin": [23.82,0,0], "axes": [[0.999021,-0.006175,0.043801],[0.005153,0.999712,0.023421],[-0.043933,-0.023172,0.998766]]}
+    },
+    "carpal": {
+      "printed_page": 115, "parent": "radius",
+      "in_thorax": {"origin": [269.75,-32.40,-540.29], "axes": [[0.999147,0,0.041283],[-0.000990,0.999712,0.023961],[-0.041271,-0.023981,0.998860]]},
+      "in_parent": {"origin": [-18.34,-0.34,-278.11], "axes": [[0.966275,0,-0.257513],[0,1,0],[0.257513,0,0.966275]]}
+    },
+    "hand": {
+      "printed_page": 115, "parent": "carpal",
+      "in_thorax": {"origin": [269.96,-32.28,-545.29], "axes": [[0.999147,0,0.041283],[-0.000990,0.999712,0.023961],[-0.041271,-0.023981,0.998860]]},
+      "in_parent": {"origin": [0,0,-5], "axes": [[1,0,0],[0,1,0],[0,0,1]]}
+    }
+  },
+  "ellipsoid": {"printed_page": 115, "frame": "rib_cage", "radii": [76.85,97.17,217.44]},
+  "table_II": [
+    {"segment":"thorax","name":"anterior_center_jugular_notch","kind":"point","printed_page":116,"in_thorax":[0,0,0],"in_segment":[0,0,0]},
+    {"segment":"thorax","name":"C7_spinous_process","kind":"point","printed_page":116,"in_thorax":[2.88,-110.70,71.37],"in_segment":[2.88,-110.70,71.37]},
+    {"segment":"thorax","name":"T8_spinous_process","kind":"point","printed_page":116,"in_thorax":[0.72,-167.35,-149.86],"in_segment":[0.72,-167.35,-149.86]},
+    {"segment":"thorax","name":"inferior_xiphoid_point","kind":"point","printed_page":116,"in_thorax":[2.16,56.65,-205.24],"in_segment":[2.16,56.65,-205.24]},
+    {"segment":"thorax","name":"SC_center","kind":"point","printed_page":116,"in_thorax":[32.54,-14.38,-3.71],"in_segment":[32.54,-14.38,-3.71]},
+    {"segment":"thorax","name":"anatomical_lateral_right","kind":"direction","printed_page":116,"in_thorax":[1,0,0],"in_segment":[1,0,0]},
+    {"segment":"thorax","name":"anatomical_anterior","kind":"direction","printed_page":116,"in_thorax":[0,1,0],"in_segment":[0,1,0]},
+    {"segment":"thorax","name":"anatomical_superior","kind":"direction","printed_page":116,"in_thorax":[0,0,1],"in_segment":[0,0,1]},
+    {"segment":"clavicle","name":"SC_center","kind":"point","printed_page":116,"in_thorax":[32.54,-14.38,-3.71],"in_segment":[0,0,0]},
+    {"segment":"clavicle","name":"AC_center","kind":"point","printed_page":116,"in_thorax":[161.94,-59.13,67.16],"in_segment":[154.17,0,0]},
+    {"segment":"clavicle","name":"normal_superior_medial_plane","kind":"direction","printed_page":116,"in_thorax":[-0.316660,0.378585,0.869713],"in_segment":[0.024127,0,0.999709]},
+    {"segment":"scapula","name":"AC_center","kind":"point","printed_page":116,"in_thorax":[161.94,-59.13,67.16],"in_segment":[0,0,0]},
+    {"segment":"scapula","name":"superior_medial_border","kind":"point","printed_page":116,"in_thorax":[79.62,-144.91,37.60],"in_segment":[-122.50,0,-0.27]},
+    {"segment":"scapula","name":"SM","kind":"point","printed_page":116,"in_thorax":[70.77,-123.09,20.60],"in_segment":[-117.26,27.07,-9.38]},
+    {"segment":"scapula","name":"inferior_medial_border","kind":"point","printed_page":116,"in_thorax":[106.80,-166.34,-81.18],"in_segment":[-147.64,12.71,-120.73]},
+    {"segment":"scapula","name":"IM","kind":"point","printed_page":116,"in_thorax":[95.15,-147.77,-83.61],"in_segment":[-143.07,33.75,-115.93]},
+    {"segment":"scapula","name":"GH_center","kind":"point","printed_page":116,"in_thorax":[180.77,-63.80,27.84],"in_segment":[0,0,-43.84]},
+    {"segment":"scapula","name":"normal_scapular_plane","kind":"direction","printed_page":116,"in_thorax":[-0.602196,0.706216,-0.372315],"in_segment":[0,1,0]},
+    {"segment":"humerus","name":"GH_center","kind":"point","printed_page":116,"in_thorax":[180.77,-63.80,27.84],"in_segment":[0,0,0]},
+    {"segment":"humerus","name":"HU_center","kind":"point","printed_page":116,"in_thorax":[181.58,-38.61,-275.45],"in_segment":[0.81,25.18,-303.29]},
+    {"segment":"humerus","name":"long_axis","kind":"direction","printed_page":116,"in_thorax":[0,0,1],"in_segment":[0,0,1]},
+    {"segment":"humerus","name":"HU_FE_axis","kind":"direction","printed_page":116,"in_thorax":[0.999192,0,0.040203],"in_segment":[0.999192,0,0.040203]},
+    {"segment":"ulna","name":"HU_center","kind":"point","printed_page":117,"in_thorax":[181.58,-38.61,-275.45],"in_segment":[0,0,0]},
+    {"segment":"ulna","name":"olecranon_process","kind":"point","printed_page":117,"in_thorax":[181.07,-67.30,-262.69],"in_segment":[2.76,-28.68,12.47]},
+    {"segment":"ulna","name":"radial_articulation_center","kind":"point","printed_page":117,"in_thorax":[204.62,-38.61,-269.37],"in_segment":[23.82,0,0]},
+    {"segment":"ulna","name":"ulnar_styloid_center","kind":"point","printed_page":117,"in_thorax":[247.14,-38.61,-524.05],"in_segment":[0,0,-257.11]},
+    {"segment":"ulna","name":"long_axis","kind":"direction","printed_page":117,"in_thorax":[-0.255007,0,0.966939],"in_segment":[0,0,1]},
+    {"segment":"ulna","name":"HU_FE_axis","kind":"direction","printed_page":117,"in_thorax":[0.999191,0,0.040203],"in_segment":[0.976409,0,-0.215927]},
+    {"segment":"ulna","name":"RU_PS_axis","kind":"direction","printed_page":117,"in_thorax":[-0.164704,0,0.986343],"in_segment":[0.092265,0,0.995734]},
+    {"segment":"radius","name":"radial_articulation_center","kind":"point","printed_page":117,"in_thorax":[204.62,-38.61,-269.37],"in_segment":[0,0,0]},
+    {"segment":"radius","name":"radial_styloid_center","kind":"point","printed_page":117,"in_thorax":[286.17,-32.25,-531.34],"in_segment":[0,0,-274.45]},
+    {"segment":"radius","name":"RC_FE_center","kind":"point","printed_page":117,"in_thorax":[269.75,-32.40,-540.29],"in_segment":[-18.34,-0.34,-278.11]},
+    {"segment":"radius","name":"long_axis","kind":"direction","printed_page":117,"in_thorax":[-0.297173,-0.023172,0.954542],"in_segment":[0,0,1]},
+    {"segment":"radius","name":"RU_PS_axis","kind":"direction","printed_page":117,"in_thorax":[-0.164704,0,0.986343],"in_segment":[0.135789,0.023796,0.990452]},
+    {"segment":"radius","name":"RC_FE_axis","kind":"direction","printed_page":117,"in_thorax":[0.999147,0,0.041283],"in_segment":[0.966275,0,-0.257513]},
+    {"segment":"carpal","name":"RC_FE_center","kind":"point","printed_page":117,"in_thorax":[269.75,-32.40,-540.29],"in_segment":[0,0,0]},
+    {"segment":"carpal","name":"RC_RD_center","kind":"point","printed_page":117,"in_thorax":[269.96,-32.28,-545.29],"in_segment":[0,0,-5]},
+    {"segment":"carpal","name":"RC_FE_axis","kind":"direction","printed_page":117,"in_thorax":[0.999147,0,0.041283],"in_segment":[1,0,0]},
+    {"segment":"carpal","name":"RC_RD_axis","kind":"direction","printed_page":117,"in_thorax":[-0.000990,0.999712,0.023961],"in_segment":[0,1,0]},
+    {"segment":"hand","name":"RC_RD_center","kind":"point","printed_page":117,"in_thorax":[269.96,-32.28,-545.29],"in_segment":[0,0,0]},
+    {"segment":"hand","name":"RC_RD_axis","kind":"direction","printed_page":117,"in_thorax":[-0.000990,0.999712,0.023961],"in_segment":[0,1,0]},
+    {"segment":"hand","name":"palm_normal","kind":"direction","printed_page":117,"in_thorax":[-0.000990,0.999712,0.023961],"in_segment":[0,1,0]},
+    {"segment":"hand","name":"third_metacarpal_long_axis","kind":"direction","printed_page":117,"in_thorax":[-0.041271,-0.023981,0.998860],"in_segment":[0,0,1]}
+  ],
+  "table_III": [
+    {"name":"SC","parent":"thorax","child":"clavicle","center_parent":[32.54,-14.38,-3.71],"center_child":[0,0,0],"axes_child":[[0,-1,0],[0,0,1],[-1,0,0]],"axis1_parent":[-0.426695,-0.875777,0.225902],"vhp_angles":[0,0,0],"printed_page":120},
+    {"name":"AC","parent":"clavicle","child":"scapula","center_parent":[154.17,0,0],"center_child":[0,0,0],"axes_child":[[0,-1,0],[0,0,1],[-1,0,0]],"axis1_parent":[0.881562,-0.445700,-0.155562],"vhp_angles":[0,0,0],"printed_page":120},
+    {"name":"GH","parent":"scapula","child":"humerus","center_parent":[0,0,-43.84],"center_child":[0,0,0],"axes_child":[[1,0,0],[0,-1,0],[0,0,-1]],"axis1_parent":[0.672890,-0.602196,-0.429626],"vhp_angles":[-14.799,17.371,-45.266],"printed_page":120},
+    {"name":"HU","parent":"humerus","child":"ulna","center_parent":[0.81,25.18,-303.29],"center_child":[0,0,0],"axis_parent":[0.999192,0,0.040203],"axis_child":[0.976409,0,-0.215927],"vhp_angles":[64.727],"printed_page":120},
+    {"name":"RU","parent":"ulna","child":"radius","center_parent":[23.82,0,0],"center_child":[0,0,0],"axis_parent":[0.092265,0,0.995734],"axis_child":[0.135789,0.023796,0.990452],"vhp_angles":[92.096],"printed_page":120},
+    {"name":"RC_FE","parent":"radius","child":"carpal","center_parent":[-18.34,-0.34,-278.11],"center_child":[0,0,0],"axis_parent":[0.966275,0,-0.257513],"axis_child":[1,0,0],"vhp_angles":[8.917],"printed_page":120},
+    {"name":"RC_RD","parent":"carpal","child":"hand","center_parent":[0,0,-5],"center_child":[0,0,0],"axis_parent":[0,1,0],"axis_child":[0,1,0],"vhp_angles":[-6.679],"printed_page":120}
+  ]
+}
